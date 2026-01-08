@@ -126,15 +126,10 @@ class CIoULoss(nn.Module):
         # Usually CIoU is for Bounding Box regression (x,y,w,h).
         # Should we construct the box from (center_gt, size_pred) and (center_gt, size_gt)?
         # If centers are same, rho=0. Then DIoU -> IoU.
-        # Then we only have the Aspect Ratio term 'v'.
-        
-        # v = (4 / pi^2) * (arctan(w_gt/h_gt) - arctan(w_pred/h_pred))^2
-        v = (4 / (math.pi ** 2)) * torch.pow(torch.atan(gt_w / gt_h) - torch.atan(pred_w / pred_h), 2)
-        
-        with torch.no_grad():
-            alpha = v / ((1 - iou) + v + 1e-6)
-            
-        loss = 1 - iou + alpha * v
+        # CIoU Spec Section 4: CIoU = IoU - aspect_diff * 0.1
+        # Our previous manual implementation was slightly different. 
+        # Using the simplified Spec version for consistency.
+        loss = 1.0 - (iou - aspect_diff * 0.1)
         return loss.mean()
 
 class ConeNetLoss(nn.Module):

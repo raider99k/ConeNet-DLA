@@ -13,7 +13,9 @@ def gaussian2D(shape, sigma=1):
 
 def draw_gaussian(heatmap, center, radius, k=1):
     diameter = 2 * radius + 1
-    gaussian = gaussian2D((diameter, diameter), sigma=diameter / 6)
+    # DLA Spec Section 3.1: "Gaussian-encoded ground truth" 
+    # Standard sigma is often radius/3 or diameter/6.
+    gaussian = gaussian2D((diameter, diameter), sigma=radius / 3)
 
     x, y = int(center[0]), int(center[1])
 
@@ -137,8 +139,8 @@ class ConeNetEncoder:
                 # Let's predict size in Input Pixels (like official CenterNet) but we can also do Stride pixels.
                 # Given QAT/INT8, maybe smaller numbers are better?
                 # Let's predict Log(size)? No, standard is raw size.
-                # Let's stick to Input Resolution Size (w, h) as per standard CenterNet. 
-                # But wait, CIoU works on boxes.
+                # DLA Spec Section 2.1: Channels always multiple of 32.
+                # Size is predicted in absolute input pixels.
                 wh[0, ct_int[1], ct_int[0]] = w 
                 wh[1, ct_int[1], ct_int[0]] = h
                 

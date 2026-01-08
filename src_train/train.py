@@ -61,6 +61,28 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device, epo
     avg_loss = total_loss / len(dataloader)
     return avg_loss
 
+def validate_one_epoch(model, dataloader, criterion, device, epoch):
+    model.eval()
+    total_loss = 0
+    stats_agg = {'hm': 0, 'off': 0, 'wh': 0}
+    
+    with torch.no_grad():
+        for i, (imgs, targets) in enumerate(dataloader):
+            imgs = imgs.to(device)
+            targets = [ {k: v.to(device) for k, v in t.items()} for t in targets]
+            
+            with autocast():
+                outputs = model(imgs)
+                loss, stats = criterion(outputs, targets)
+                
+            total_loss += loss.item()
+            for k in stats_agg:
+                stats_agg[k] += stats[k]
+                
+    avg_loss = total_loss / len(dataloader)
+    print(f"Epoch {epoch} Validation Loss: {avg_loss:.4f} (HM: {stats_agg['hm']/len(dataloader):.4f}, OFF: {stats_agg['off']/len(dataloader):.4f}, WH: {stats_agg['wh']/len(dataloader):.4f})")
+    return avg_loss
+
 def main(args):
     if args.qat:
         if HAS_PYTORCH_QUANT:
@@ -78,11 +100,14 @@ def main(args):
     # 2. Dataset
     if args.dummy:
         print("Using Dummy Dataset")
-        dataset = DummyConeNetDataset(num_samples=args.batch_size * 5)
+        train_dataset = DummyConeNetDataset(num_samples=args.batch_size * 5)
+        val_dataset = DummyConeNetDataset(num_samples=args.batch_size * 2)
     else:
-        dataset = ConeNetDataset(args.img_dir, args.label_dir)
+        train_dataset = ConeNetDataset(args.img_dir, args.label_dir)
+        val_dataset = ConeNetDataset(args.val_img_dir, args.val_label_dir) if args.val_img_dir else None
         
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.workers, collate_fn=collate_fn)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.workers, collate_fn=collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, collate_fn=collate_fn) if val_dataset else None
     
     # 3. Loss, Optimizer, Scheduler
     criterion = ConeNetLoss().to(device)
@@ -90,8 +115,9 @@ def main(args):
     # 3.1 QAT Calibration
     if args.qat and args.calibrate:
         print("Starting QAT Calibration...")
-        # Use a separate loader for calibration to avoid shuffling issues if needed
-        calib_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=0, collate_fn=collate_fn)
+        # Use a separate loader for calibration to avoid shuffling issues
+        calib_dataset = train_dataset if not args.dummy else train_dataset
+        calib_loader = DataLoader(calib_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0, collate_fn=collate_fn)
         calibrate_model(model, calib_loader, device, num_batches=args.calib_batches)
         
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -111,7 +137,7 @@ def main(args):
     
     # OneCycleLR is great for fast convergence
     scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, 
-                                            steps_per_epoch=len(dataloader), 
+                                            steps_per_epoch=len(train_loader), 
                                             epochs=args.epochs)
     
     scaler = GradScaler()
@@ -121,16 +147,20 @@ def main(args):
     os.makedirs(args.work_dir, exist_ok=True)
     
     for epoch in range(args.epochs):
-        avg_loss = train_one_epoch(model, dataloader, criterion, optimizer, scaler, device, epoch)
+        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, scaler, device, epoch)
         scheduler.step()
         
-        print(f"Epoch {epoch} Average Loss: {avg_loss:.4f}")
+        val_loss = train_loss
+        if val_loader:
+            val_loss = validate_one_epoch(model, val_loader, criterion, device, epoch)
         
-        # Save Checkpoint
-        if avg_loss < best_loss:
-            best_loss = avg_loss
+        print(f"Epoch {epoch} Summary | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+        
+        # Save Checkpoint based on Validation Loss (or Train Loss if no Val)
+        if val_loss < best_loss:
+            best_loss = val_loss
             torch.save(model.state_dict(), os.path.join(args.work_dir, 'best_model.pth'))
-            print("Saved Best Model")
+            print(f"Saved Best Model to {args.work_dir}")
             
         if epoch % 5 == 0:
             torch.save(model.state_dict(), os.path.join(args.work_dir, f'epoch_{epoch}.pth'))
@@ -139,7 +169,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--img_dir', type=str, default='data/images')
     parser.add_argument('--label_dir', type=str, default='data/labels')
-    parser.add_argument('--work_dir', type=str, default='work_dirs/conenet_v1')
+    parser.add_argument('--val_img_dir', type=str, default=None)
+    parser.add_argument('--val_label_dir', type=str, default=None)
+    parser.add_argument('--work_dir', type=str, default='/kaggle/working/conenet_v1')
     parser.add_argument('--batch_size', type=int, default=4)
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--lr', type=float, default=1e-3)
